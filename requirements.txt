@@ -3,4 +3,3 @@ openpyxl
 pandas
 scikit-learn
 torch
-torch-levenberg-marquardt

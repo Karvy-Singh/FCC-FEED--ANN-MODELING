@@ -18,13 +18,16 @@ The paper uses the following setup:
 - N architecture: 12 and 12 hidden neurons.
 - A architecture: 9 and 9 hidden neurons.
 - Hidden activations: `tansig` then `logsig`; output activation: `purelin`.
-- Levenberg-Marquardt training.
+- Pure-PyTorch Levenberg-Marquardt training with MATLAB's documented defaults:
+  `mu=0.001`, `mu_dec=0.1`, `mu_inc=10`, `mu_max=1e10`, `min_grad=1e-7`,
+  and six validation failures.
 - MATLAB-style `mapminmax` scaling of both inputs and each target.
+- Deterministic Nguyen-Widrow initialization for every seeded restart.
 
-Table 4 uses MSE for P and N, but MATLAB `msereg` (MSE plus weight/bias
-regularization) for A. The paper does not report the regularization ratio, so
-the script uses MSE for all three and does not pretend that this undocumented
-part can be reproduced exactly.
+Table 4 uses MSE for P and N, but MATLAB `msereg` for A. The script implements
+`ratio*MSE + (1-ratio)*MSW`, including the parameter residuals in the LM
+Jacobian. It defaults to MATLAB's `ratio=0.5`; use `--msereg-ratio` to test a
+different value if the authors used a non-default setting.
 
 The original notebook omitted target scaling. This leaves LM fitting values in
 the range 5-76 directly and is the main reason its training and validation errors
@@ -35,3 +38,7 @@ trained weights, random initialization, preprocessing state, or stopping history
 This matters because each network has 181-291 parameters but only 16 training
 observations. The script therefore runs deterministic restarts, selects a run using
 only samples 23-28, and evaluates samples 17-22 once at the end.
+
+This is a behavioral reimplementation, not a guarantee of identical MATLAB
+floating-point trajectories. PyTorch and the unknown MATLAB release can still
+differ in Nguyen-Widrow details, linear-system solvers, and accepted LM steps.

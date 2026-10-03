@@ -8,9 +8,7 @@ default; omitting that step makes LM training poorly conditioned.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import copy
-import io
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,9 +16,9 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch_levenberg_marquardt as tlm
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset
+from torch.func import functional_call, jacrev
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 
 FEATURES = ["Sp. Gr", "5 %", "10 %", "30 %", "50 %", "70 %", "90 %", "95 %"]
@@ -40,6 +38,22 @@ class ANN(nn.Module):
         x = torch.tanh(self.fc1(x))       # MATLAB tansig
         x = torch.sigmoid(self.fc2(x))    # MATLAB logsig
         return self.out(x)                # MATLAB purelin
+
+    def initialize_nguyen_widrow(self, seed: int) -> None:
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        for layer in (self.fc1, self.fc2, self.out):
+            neurons, inputs = layer.weight.shape
+            weights = torch.rand(
+                (neurons, inputs), generator=generator, dtype=DTYPE
+            ) - 0.5
+            weights /= torch.linalg.vector_norm(weights, dim=1, keepdim=True)
+            beta = 0.7 * neurons ** (1.0 / inputs)
+            layer.weight.data.copy_(beta * weights)
+
+            biases = beta * (
+                2.0 * torch.rand(neurons, generator=generator, dtype=DTYPE) - 1.0
+            )
+            layer.bias.data.copy_(biases)
 
 
 @dataclass
@@ -72,34 +86,89 @@ def train_once(
     seed: int,
     max_epochs: int,
     max_failures: int = 6,
+    regularization_ratio: float = 1.0,
 ) -> FittedTarget:
     torch.manual_seed(seed)
     model = ANN(hidden_1, hidden_2).to(dtype=DTYPE)
+    model.initialize_nguyen_widrow(seed)
     train_target = torch.tensor(y_train, dtype=DTYPE).reshape(-1, 1)
-    loader = DataLoader(
-        TensorDataset(x_train, train_target),
-        batch_size=len(x_train),
-        shuffle=False,
-    )
-    trainer = tlm.training.LevenbergMarquardtModule(
-        model=model,
-        loss_fn=tlm.loss.MSELoss(),
-        learning_rate=1.0,
-        attempts_per_step=10,
-        solve_method="qr",
-    )
+    named_parameters = list(model.named_parameters())
+    parameter_names = [name for name, _ in named_parameters]
+    parameter_sizes = [parameter.numel() for _, parameter in named_parameters]
+    parameter_shapes = [parameter.shape for _, parameter in named_parameters]
 
-    best_loss = float("inf")
+    def residuals(flat_parameters: torch.Tensor) -> torch.Tensor:
+        chunks = torch.split(flat_parameters, parameter_sizes)
+        parameters = {
+            name: chunk.view(shape)
+            for name, chunk, shape in zip(parameter_names, chunks, parameter_shapes)
+        }
+        prediction = functional_call(model, parameters, (x_train,))
+        errors = prediction.ravel() - train_target.ravel()
+        data_part = np.sqrt(regularization_ratio / errors.numel()) * errors
+        if regularization_ratio == 1.0:
+            return data_part
+
+        # MATLAB msereg: ratio*MSE + (1-ratio)*mean(square(weights and biases)).
+        weight_part = np.sqrt(
+            (1.0 - regularization_ratio) / flat_parameters.numel()
+        ) * flat_parameters
+        return torch.cat((data_part, weight_part))
+
+    mu = 1e-3
+    mu_decrease = 0.1
+    mu_increase = 10.0
+    mu_max = 1e10
+    minimum_gradient = 1e-7
+    with torch.no_grad():
+        initial_prediction = model(x_test).cpu().numpy()
+    best_loss = float(np.mean((initial_prediction - y_test) ** 2))
     best_epoch = 0
     best_state = copy.deepcopy(model.state_dict())
     failures = 0
 
     for epoch in range(1, max_epochs + 1):
-        # The package prints a progress bar for every one-epoch LM step.
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-            io.StringIO()
-        ):
-            tlm.utils.fit(trainer, loader, epochs=1)
+        flat_parameters = parameters_to_vector(model.parameters()).detach()
+        residual_vector = residuals(flat_parameters)
+        jacobian = jacrev(residuals)(flat_parameters)
+        gradient = jacobian.T @ residual_vector
+        gradient_norm = torch.linalg.vector_norm(gradient, ord=float("inf"))
+        if gradient_norm <= minimum_gradient:
+            break
+
+        current_performance = torch.dot(residual_vector, residual_vector)
+        accepted = False
+        while mu <= mu_max:
+            try:
+                if jacobian.shape[0] < jacobian.shape[1]:
+                    system = jacobian @ jacobian.T
+                    system += mu * torch.eye(system.shape[0], dtype=DTYPE)
+                    update = jacobian.T @ torch.linalg.solve(system, residual_vector)
+                else:
+                    system = jacobian.T @ jacobian
+                    system += mu * torch.eye(system.shape[0], dtype=DTYPE)
+                    update = torch.linalg.solve(system, gradient)
+            except RuntimeError:
+                mu *= mu_increase
+                continue
+
+            candidate = flat_parameters - update
+            candidate_residuals = residuals(candidate)
+            candidate_performance = torch.dot(
+                candidate_residuals, candidate_residuals
+            )
+            if (
+                torch.isfinite(candidate_performance)
+                and candidate_performance < current_performance
+            ):
+                vector_to_parameters(candidate, model.parameters())
+                mu = max(mu * mu_decrease, torch.finfo(DTYPE).eps)
+                accepted = True
+                break
+            mu *= mu_increase
+
+        if not accepted:
+            break
 
         with torch.no_grad():
             prediction = model(x_test).cpu().numpy()
@@ -147,8 +216,18 @@ def main() -> None:
     parser.add_argument("workbook", nargs="?", type=Path, default=Path("FCC_feed_data.xlsx"))
     parser.add_argument("--starts", type=int, default=10, help="seeded restarts per target")
     parser.add_argument("--max-epochs", type=int, default=1000)
+    parser.add_argument(
+        "--msereg-ratio",
+        type=float,
+        default=0.5,
+        help="A-model fraction assigned to MSE; MATLAB msereg default is 0.5",
+    )
     args = parser.parse_args()
+    if not 0.0 < args.msereg_ratio <= 1.0:
+        parser.error("--msereg-ratio must be in (0, 1]")
 
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(1)
     data = load_data(args.workbook)
 
     # These row groups reproduce the workbook/paper organization. Rows 17-22
@@ -184,6 +263,7 @@ def main() -> None:
                 hidden_2,
                 seed=1000 * target_index + seed,
                 max_epochs=args.max_epochs,
+                regularization_ratio=(args.msereg_ratio if target == "A" else 1.0),
             )
             for seed in range(args.starts)
         ]
