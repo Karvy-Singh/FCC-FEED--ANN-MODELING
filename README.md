@@ -42,3 +42,17 @@ only samples 23-28, and evaluates samples 17-22 once at the end.
 This is a behavioral reimplementation, not a guarantee of identical MATLAB
 floating-point trajectories. PyTorch and the unknown MATLAB release can still
 differ in Nguyen-Widrow details, linear-system solvers, and accepted LM steps.
+
+## MATLAB Online
+
+Upload `FCC_feed_data.xlsx` and `fcc_ann_matlab.m` to the same folder in
+[MATLAB Online](https://matlab.mathworks.com/), open `fcc_ann_matlab.m`, and
+click **Run**. Deep Learning Toolbox is required. The script writes
+`fcc_matlab_predictions.csv` and saves the trained networks as
+`fcc_matlab_models.mat`.
+
+The paper is ambiguous about whether samples 23-28 were used for early stopping
+or only post-training testing. The script defaults to test-only behavior, which
+matches the paper's terminology. Run the alternative by changing
+`useTestingRowsForEarlyStopping` to `true`. Keep samples 17-22 untouched in both
+cases because they are the published final validation rows.
