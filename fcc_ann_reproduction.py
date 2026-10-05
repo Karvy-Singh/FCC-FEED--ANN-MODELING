@@ -20,7 +20,6 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.func import functional_call, jacrev
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
-
 FEATURES = ["Sp. Gr", "5 %", "10 %", "30 %", "50 %", "70 %", "90 %", "95 %"]
 TARGETS = ["P", "N", "A"]
 ARCHITECTURES = {"P": (12, 13), "N": (12, 12), "A": (9, 9)}
@@ -35,17 +34,17 @@ class ANN(nn.Module):
         self.out = nn.Linear(hidden_2, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.tanh(self.fc1(x))       # MATLAB tansig
-        x = torch.sigmoid(self.fc2(x))    # MATLAB logsig
-        return self.out(x)                # MATLAB purelin
+        x = torch.tanh(self.fc1(x))  # MATLAB tansig
+        x = torch.sigmoid(self.fc2(x))  # MATLAB logsig
+        return self.out(x)  # MATLAB purelin
 
     def initialize_nguyen_widrow(self, seed: int) -> None:
         generator = torch.Generator(device="cpu").manual_seed(seed)
         for layer in (self.fc1, self.fc2, self.out):
             neurons, inputs = layer.weight.shape
-            weights = torch.rand(
-                (neurons, inputs), generator=generator, dtype=DTYPE
-            ) - 0.5
+            weights = (
+                torch.rand((neurons, inputs), generator=generator, dtype=DTYPE) - 0.5
+            )
             weights /= torch.linalg.vector_norm(weights, dim=1, keepdim=True)
             beta = 0.7 * neurons ** (1.0 / inputs)
             layer.weight.data.copy_(beta * weights)
@@ -110,9 +109,10 @@ def train_once(
             return data_part
 
         # MATLAB msereg: ratio*MSE + (1-ratio)*mean(square(weights and biases)).
-        weight_part = np.sqrt(
-            (1.0 - regularization_ratio) / flat_parameters.numel()
-        ) * flat_parameters
+        weight_part = (
+            np.sqrt((1.0 - regularization_ratio) / flat_parameters.numel())
+            * flat_parameters
+        )
         return torch.cat((data_part, weight_part))
 
     mu = 1e-3
@@ -154,9 +154,7 @@ def train_once(
 
             candidate = flat_parameters - update
             candidate_residuals = residuals(candidate)
-            candidate_performance = torch.dot(
-                candidate_residuals, candidate_residuals
-            )
+            candidate_performance = torch.dot(candidate_residuals, candidate_residuals)
             if (
                 torch.isfinite(candidate_performance)
                 and candidate_performance < current_performance
@@ -213,13 +211,17 @@ def metrics(observed: np.ndarray, predicted: np.ndarray) -> tuple[float, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("workbook", nargs="?", type=Path, default=Path("FCC_feed_data.xlsx"))
-    parser.add_argument("--starts", type=int, default=10, help="seeded restarts per target")
+    parser.add_argument(
+        "workbook", nargs="?", type=Path, default=Path("FCC_feed_data.xlsx")
+    )
+    parser.add_argument(
+        "--starts", type=int, default=10, help="seeded restarts per target"
+    )
     parser.add_argument("--max-epochs", type=int, default=1000)
     parser.add_argument(
         "--msereg-ratio",
         type=float,
-        default=0.5,
+        default=0.45,
         help="A-model fraction assigned to MSE; MATLAB msereg default is 0.5",
     )
     args = parser.parse_args()
